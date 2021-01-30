@@ -1,0 +1,250 @@
+package main
+
+import (
+	"bytes"
+	"io/ioutil"
+	"log"
+	"os"
+	"strconv"
+	"strings"
+)
+
+func main() {
+	if len(os.Args) != 2 {
+		os.Exit(0)
+	}
+
+	file, err := ioutil.ReadFile(os.Args[1])
+	if err != nil {
+		log.Fatal("can't open file:", err)
+	}
+
+	machLangCode := translate(file)
+	fName := strings.TrimRight(os.Args[1], ".asm")
+	err = ioutil.WriteFile(fName+".hack", machLangCode, os.ModePerm)
+	if err != nil {
+		log.Fatal("err while write to file:", err)
+	}
+}
+
+func translate(file []byte) []byte {
+	cleared := bytes.Split(clear(file), []byte{'\n'})
+	labeLess := [][]byte{}
+	symbolTable := map[string]int{
+		"R0":0, "R1":1, "R2":2, "R3":3, "R4":4, "R5":5, "R6":6, "R7":7, "R8":8,
+		"R9":9, "R10":10, "R11":11, "R12":12, "R13":13, "R14":14, "R15":15,
+		"SCREEN":16384, "KBD":24576,
+		"SP":0, "LCL":1, "ARG":2, "THIS":3, "THAT":4,
+	}
+
+	n := 0
+	for i := range cleared {
+		if cleared[i] == nil || len(cleared[i]) < 1 {
+			continue
+		}
+
+		if cleared[i][0] == '@' {
+			labeLess = append(labeLess, cleared[i])
+			n++
+		} else if cleared[i][0] == '(' {
+			label := strings.Trim(string(cleared[i]), "()")
+			symbolTable[label] = n
+		} else {
+			labeLess = append(labeLess, parseCinstr(cleared[i]))
+			n++
+		}
+	}
+
+	ans := []byte{}
+	n = 16
+	for i := range labeLess {
+		if labeLess[i][0] == '@' {
+			aInstr := bytes.TrimLeft(labeLess[i], "@")
+			if v, ok := symbolTable[string(aInstr)]; ok {
+				ans = append(ans, convertToBin(v)...)
+			} else if v, err := strconv.Atoi(string(aInstr)); err == nil {
+				ans = append(ans, convertToBin(v)...)
+			} else {
+				symbolTable[string(aInstr)] = n
+				ans = append(ans, convertToBin(n)...)
+				n++
+			}
+		} else {
+			ans = append(ans, labeLess[i]...)
+		}
+		ans = append(ans, '\n')
+	}
+	return ans
+}
+
+func convertToBin(n int) []byte {
+	ans := make([]byte, 0, 16)
+	ans = append(ans, '0')
+	//1   2		4    8   	16 	 32   64 	128
+	//256 512 1024 2048     4096 8182 16364	noNeedCause biggest Bit is 0 for A-instr defining
+	i := 1 << 14
+	for; i > 0; i >>= 1 {
+		if n & i == i {
+			ans = append(ans, '1')
+		} else {
+			ans = append(ans, '0')
+		}
+	}
+	return ans
+}
+
+type cInstr struct {
+	a string
+	comp string
+	dst string
+	jmp string
+}
+func parseCinstr(instruction []byte) []byte {
+	instr := cInstrInit()
+	dest, comp := "", ""
+	eq := false
+	for i := 0; i < len(instruction); i++ {
+		if instruction[i] == ';' {
+			instr.jmp = jump(instruction, i+1)
+			break
+		} else if instruction[i] != '=' && !eq {
+			dest += string(instruction[i])
+		} else if instruction[i] == '=' {
+			eq = true
+		} else if instruction[i] != ';' {
+			comp += string(instruction[i])
+		}
+	}
+	
+	if eq {
+		instr.dst = parseDest(dest)
+		instr.a, instr.comp = parseComp(comp)
+	} else {
+		instr.a, instr.comp = parseComp(dest)
+	}
+
+	return []byte("111" + instr.a + instr.comp + instr.dst + instr.jmp)
+}
+
+func parseComp(comp string) (a string, cmp string) {
+	a = "0"
+	switch comp {
+	case "0":
+		cmp = "101010"
+	case "1":
+		cmp = "111111"
+	case "-1":
+		cmp = "111010"
+	case "D":
+		cmp = "001100"
+	case "A", "M":
+		cmp = "110000"
+	case "!D":
+		cmp = "001101"
+	case "!A", "!M":
+		cmp = "110001"
+	case "-D":
+		cmp = "001111"
+	case "-A", "-M":
+		cmp = "110011"
+	case "D+1":
+		cmp = "011111"
+	case "A+1", "M+1":
+		cmp = "110111"
+	case "D-1":
+		cmp = "001110"
+	case "A-1", "M-1":
+		cmp = "110010"
+	case "D+A", "D+M":
+		cmp = "000010"
+	case "D-A", "D-M":
+		cmp = "010011"
+	case "A-D", "M-D":
+		cmp = "000111"
+	case "D|A", "D|M":
+		cmp = "010101"
+	default: //case "D&A", "D&M":
+		cmp = "000000"
+	}
+
+	if strings.Contains(comp, "M") {
+		a = "1"
+	}
+
+	return
+}
+
+func parseDest(dest string) string {
+	switch dest {
+	case "M":
+		return "001"
+	case "D":
+		return "010"
+	case "MD":
+		return "011"
+	case "A":
+		return "100"
+	case "AM":
+		return "101"
+	case "AD":
+		return "110"
+	default: //"AMD":
+		return "111"
+	}
+}
+
+func cInstrInit() cInstr {
+	return cInstr{
+		a:    "0",
+		comp: "000000",
+		dst:  "000",
+		jmp:  "000",
+	}
+}
+
+func jump(cleared []byte, i int) string {
+	jmp := ""
+	for ; i < len(cleared) && cleared[i] != '\n'; i++ {
+		jmp += string(cleared[i])
+	}
+
+	switch jmp {
+	case "JGT":
+		return "001"
+	case "JEQ":
+		return "010"
+	case "JGE":
+		return "011"
+	case "JLT":
+		return "100"
+	case "JNE":
+		return "101"
+	case "JLE":
+		return "110"
+	default: // JMP
+		return "111"
+	}
+}
+
+func clear(file []byte) []byte {
+	cleared := []byte{}
+	symbol := false
+	for i := 0; i < len(file); i++ {
+		if file[i] == '/' && file[i+1] == '/' {
+			i++
+			for ; i < len(file) && file[i] != '\n' && file[i] != 13; i++ {
+			}
+			continue
+		} else if file[i] == ' ' || file[i] == '\n' || file[i] == 13 {
+			continue
+		} else if symbol == true && (file[i-1] == 13 || file[i-1] == '\n' || file[i-1] == ' ') {
+			cleared = append(cleared, '\n')
+			symbol = false
+		}
+
+		cleared = append(cleared, file[i])
+		symbol = true
+	}
+	cleared = append(cleared, '\n')
+	return cleared
+}
